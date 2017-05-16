@@ -36,6 +36,7 @@ pub use self::servo::webrender_traits::ScrollLocation;
 
 #[derive(Debug)]
 pub enum BrowserEvent {
+    PrepareForComposite,
     SetWindowInnerSize(u32, u32),
     SetWindowPosition(i32, i32),
     SetFullScreenState(bool),
@@ -175,6 +176,10 @@ impl Browser {
 
 impl WindowMethods for View {
     fn prepare_for_composite(&self, _width: usize, _height: usize) -> bool {
+        self.event_queue
+            .borrow_mut()
+            .push(BrowserEvent::PrepareForComposite);
+        // FIXME: View should have a chance to return false
         true
     }
 
