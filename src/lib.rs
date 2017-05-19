@@ -103,11 +103,8 @@ impl Constellation {
         set_resources_path(Some(path));
 
         let mut opts = opts::default_opts();
-        opts.headless = false;
         opts.url = ServoUrl::parse("https://servo.org").ok();
         opts::set_defaults(opts);
-        // FIXME: Pipeline creation fails is layout_threads pref not set
-        PREFS.set("layout.threads", PrefValue::Number(1.0));
 
         Ok(Constellation)
     }
