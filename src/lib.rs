@@ -36,11 +36,9 @@ pub use self::servo::webrender_traits::ScrollLocation;
 
 #[derive(Debug)]
 pub enum BrowserEvent {
-    PrepareForComposite,
     SetWindowInnerSize(u32, u32),
     SetWindowPosition(i32, i32),
     SetFullScreenState(bool),
-    Present,
     TitleChanged(Option<String>),
     UnhandledURL(ServoUrl),
     StatusChanged(Option<String>),
@@ -54,18 +52,21 @@ pub enum BrowserEvent {
     Key(Option<char>, Key, constellation_msg::KeyModifiers),
 }
 
-type CompositorChannel = (Box<CompositorProxy + Send>, Box<CompositorReceiver>);
+pub trait EventLoopRiser {
+    fn clone(&self) -> Box<EventLoopRiser + Send>;
+    fn rise(&self);
+}
+
+pub trait GLMethods {
+    fn make_current(&self) -> Result<(),()>;
+    fn swap_buffers(&self);
+}
 
 pub struct Constellation;
 
 pub enum BrowserVisibility {
     Visible,
     Hidden,
-}
-
-pub trait EventLoopRiser {
-    fn clone(&self) -> Box<EventLoopRiser + Send>;
-    fn rise(&self);
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -83,6 +84,7 @@ pub struct Compositor {
 pub struct View {
     // FIXME: instead, use compositor
     gl: Rc<gl::Gl>,
+    gl_methods: Box<GLMethods>,
     geometry: Cell<DrawableGeometry>,
     riser: Box<EventLoopRiser + Send>,
     event_queue: RefCell<Vec<BrowserEvent>>,
@@ -117,13 +119,15 @@ impl Compositor {
 }
 
 impl View {
-    pub fn new<R: EventLoopRiser + 'static + Send>(compositor: &Compositor,
-                                                   geometry: DrawableGeometry,
-                                                   riser: Box<R>)
-                                                   -> Rc<View> {
+    pub fn new(compositor: &Compositor,
+               geometry: DrawableGeometry,
+               riser: Box<EventLoopRiser + 'static + Send>,
+               gl_methods: Box<GLMethods>) -> Rc<View> {
+
         Rc::new(View {
                     gl: compositor.gl.clone(),
                     geometry: Cell::new(geometry),
+                    gl_methods: gl_methods,
                     riser: riser,
                     event_queue: RefCell::new(Vec::new()),
                 })
@@ -148,11 +152,12 @@ impl View {
 
 impl Browser {
     pub fn new(_constellation: &Constellation, _url: ServoUrl, view: Rc<View>) -> Browser {
-
         let mut servo = servo::Browser::new(view.clone());
-        servo.handle_events(vec![WindowEvent::InitializeCompositing]);
-
         Browser { servo_browser: RefCell::new(servo) }
+    }
+
+    pub fn initialize_compositing(&self) {
+        self.servo_browser.borrow_mut().handle_events(vec![WindowEvent::InitializeCompositing]);
     }
 
     pub fn set_visibility(&self, _: BrowserVisibility) {
@@ -173,11 +178,7 @@ impl Browser {
 
 impl WindowMethods for View {
     fn prepare_for_composite(&self, _width: usize, _height: usize) -> bool {
-        self.event_queue
-            .borrow_mut()
-            .push(BrowserEvent::PrepareForComposite);
-        // FIXME: View should have a chance to return false
-        true
+        self.gl_methods.make_current().is_ok()
     }
 
     fn supports_clipboard(&self) -> bool {
@@ -188,7 +189,7 @@ impl WindowMethods for View {
         true
     }
 
-    fn create_compositor_channel(&self) -> CompositorChannel {
+    fn create_compositor_channel(&self) -> (Box<CompositorProxy + Send>, Box<CompositorReceiver>) {
         let (sender, receiver) = mpsc::channel();
         (box SynchroCompositorProxy {
                  sender: sender,
@@ -260,9 +261,7 @@ impl WindowMethods for View {
     }
 
     fn present(&self) {
-        self.event_queue
-            .borrow_mut()
-            .push(BrowserEvent::Present);
+        self.gl_methods.swap_buffers();
     }
 
     fn set_page_title(&self, title: Option<String>) {
