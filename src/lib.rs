@@ -19,7 +19,6 @@ use self::servo::euclid::size::TypedSize2D;
 use self::servo::net_traits::net_error_list::NetError;
 use self::servo::servo_config::resource_files::set_resources_path;
 use self::servo::servo_config::opts;
-use self::servo::servo_config::prefs::{PrefValue, PREFS};
 use self::servo::servo_geometry::DeviceIndependentPixel;
 use self::servo::script_traits::{DevicePixel, LoadData};
 
@@ -28,6 +27,7 @@ use std::env;
 use std::sync::mpsc;
 use std::rc::Rc;
 
+pub use self::servo::config::servo_version;
 pub use self::servo::compositing::windowing::WindowEvent;
 pub use self::servo::servo_url::ServoUrl;
 pub use self::servo::style_traits::cursor::Cursor;
@@ -64,11 +64,6 @@ pub trait GLMethods {
 
 pub struct Constellation;
 
-pub enum BrowserVisibility {
-    Visible,
-    Hidden,
-}
-
 #[derive(Debug, Copy, Clone)]
 pub struct DrawableGeometry {
     pub view_size: (u32, u32),
@@ -84,7 +79,7 @@ pub struct Compositor {
 pub struct View {
     // FIXME: instead, use compositor
     gl: Rc<gl::Gl>,
-    gl_methods: Box<GLMethods>,
+    gl_methods: Rc<GLMethods>,
     geometry: Cell<DrawableGeometry>,
     riser: Box<EventLoopRiser + Send>,
     event_queue: RefCell<Vec<BrowserEvent>>,
@@ -122,15 +117,15 @@ impl View {
     pub fn new(compositor: &Compositor,
                geometry: DrawableGeometry,
                riser: Box<EventLoopRiser + 'static + Send>,
-               gl_methods: Box<GLMethods>) -> Rc<View> {
+               gl_methods: Rc<GLMethods>) -> View {
 
-        Rc::new(View {
+        View {
                     gl: compositor.gl.clone(),
                     geometry: Cell::new(geometry),
                     gl_methods: gl_methods,
                     riser: riser,
                     event_queue: RefCell::new(Vec::new()),
-                })
+        }
     }
 
     // FIXME
@@ -152,16 +147,12 @@ impl View {
 
 impl Browser {
     pub fn new(_constellation: &Constellation, _url: ServoUrl, view: Rc<View>) -> Browser {
-        let mut servo = servo::Browser::new(view.clone());
+        let servo = servo::Browser::new(view.clone());
         Browser { servo_browser: RefCell::new(servo) }
     }
 
     pub fn initialize_compositing(&self) {
         self.servo_browser.borrow_mut().handle_events(vec![WindowEvent::InitializeCompositing]);
-    }
-
-    pub fn set_visibility(&self, _: BrowserVisibility) {
-        // FIXME
     }
 
     pub fn handle_event(&self, event: WindowEvent) {

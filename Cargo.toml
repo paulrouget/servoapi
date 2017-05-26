@@ -4,6 +4,6 @@ version = "0.1.0"
 authors = ["Paul Rouget <me@paulrouget.com>"]
 
 [dependencies]
-libservo = { git = "https://github.com/servo/servo", rev = "d1eef9d08a" }
+libservo = { git = "https://github.com/servo/servo" }
 gleam = "0.4"
 log = "0.3"
