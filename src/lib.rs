@@ -1,68 +1,54 @@
 #![feature(box_syntax)]
 
-#[macro_use]
-extern crate log;
-
 extern crate servo;
 extern crate gleam;
 
 use gleam::gl;
 
-use self::servo::compositing::compositor_thread::{self, CompositorProxy, CompositorReceiver};
+use self::servo::Servo;
 use self::servo::compositing::windowing::WindowMethods;
-use self::servo::msg::constellation_msg::{self, Key};
-use self::servo::euclid::{Point2D, Size2D};
-use self::servo::euclid::point::TypedPoint2D;
-use self::servo::euclid::rect::TypedRect;
-use self::servo::euclid::scale_factor::ScaleFactor;
-use self::servo::euclid::size::TypedSize2D;
+use self::servo::euclid::{Point2D, Size2D, TypedPoint2D, TypedRect, ScaleFactor, TypedSize2D};
+use self::servo::ipc_channel::ipc::IpcSender;
 use self::servo::net_traits::net_error_list::NetError;
 use self::servo::servo_config::resource_files::set_resources_path;
-use self::servo::servo_config::opts;
 use self::servo::servo_geometry::DeviceIndependentPixel;
 use self::servo::script_traits::{DevicePixel, LoadData};
 
 use std::cell::{Cell, RefCell};
 use std::env;
-use std::sync::mpsc;
 use std::rc::Rc;
 
+
+use self::servo::msg::constellation_msg;
+
+pub use self::servo::BrowserId;
+pub use self::servo::msg::constellation_msg::{Key, KeyModifiers, KeyState};
+pub use self::servo::msg::constellation_msg::{ALT, CONTROL, NONE, SHIFT, SUPER};
 pub use self::servo::config::servo_version;
-pub use self::servo::compositing::windowing::WindowEvent;
+pub use self::servo::compositing::windowing::{MouseWindowEvent, WindowNavigateMsg, WindowEvent};
 pub use self::servo::servo_url::ServoUrl;
 pub use self::servo::style_traits::cursor::Cursor;
-pub use self::servo::script_traits::TouchEventType;
+pub use self::servo::script_traits::{MouseButton, TouchEventType};
 pub use self::servo::webrender_traits::ScrollLocation;
+pub use self::servo::compositing::compositor_thread::EventLoopWaker;
 
 #[derive(Debug)]
 pub enum BrowserEvent {
-    SetWindowInnerSize(u32, u32),
-    SetWindowPosition(i32, i32),
-    SetFullScreenState(bool),
-    TitleChanged(Option<String>),
-    UnhandledURL(ServoUrl),
-    StatusChanged(Option<String>),
-    LoadStart,
-    LoadEnd,
-    LoadError(String),
-    HeadParsed,
-    HistoryChanged(Vec<LoadData>, usize),
+    SetWindowInnerSize(BrowserId, u32, u32),
+    SetWindowPosition(BrowserId, i32, i32),
+    SetFullScreenState(BrowserId, bool),
+    TitleChanged(BrowserId, Option<String>),
+    StatusChanged(BrowserId, Option<String>),
+    LoadStart(BrowserId),
+    LoadEnd(BrowserId),
+    LoadError(BrowserId, String),
+    HeadParsed(BrowserId),
+    HistoryChanged(BrowserId, Vec<LoadData>, usize),
     CursorChanged(Cursor),
-    FaviconChanged(ServoUrl),
-    Key(Option<char>, Key, constellation_msg::KeyModifiers),
+    FaviconChanged(BrowserId, ServoUrl),
+    Key(Option<BrowserId>, Option<char>, Key, constellation_msg::KeyModifiers),
+    AllowNavigation(BrowserId, ServoUrl, IpcSender<bool>),
 }
-
-pub trait EventLoopRiser {
-    fn clone(&self) -> Box<EventLoopRiser + Send>;
-    fn rise(&self);
-}
-
-pub trait GLMethods {
-    fn make_current(&self) -> Result<(),()>;
-    fn swap_buffers(&self);
-}
-
-pub struct Constellation;
 
 #[derive(Debug, Copy, Clone)]
 pub struct DrawableGeometry {
@@ -72,102 +58,85 @@ pub struct DrawableGeometry {
     pub hidpi_factor: f32,
 }
 
+pub trait GLMethods {
+    fn make_current(&self) -> Result<(),()>;
+    fn swap_buffers(&self);
+    fn get_gl(&self) -> Rc<gl::Gl>;
+}
+
+pub struct Constellation {
+}
+
 pub struct Compositor {
-    gl: Rc<gl::Gl>,
+    servo: RefCell<Servo<WindowCallback>>,
+    callbacks: Rc<WindowCallback>,
 }
 
 pub struct View {
-    // FIXME: instead, use compositor
-    gl: Rc<gl::Gl>,
-    gl_methods: Rc<GLMethods>,
-    geometry: Cell<DrawableGeometry>,
-    riser: Box<EventLoopRiser + Send>,
-    event_queue: RefCell<Vec<BrowserEvent>>,
 }
 
-pub struct Browser {
-    servo_browser: RefCell<servo::Browser<View>>,
+impl View {
+    pub fn show(&self, _: Option<BrowserId>) {
+    }
+}
+
+struct WindowCallback {
+    gl_methods: Rc<GLMethods>,
+    waker: Box<EventLoopWaker + 'static + Send>,
+    event_queue: RefCell<Vec<BrowserEvent>>,
+    pub geometry: Cell<DrawableGeometry>,
 }
 
 impl Constellation {
     pub fn new() -> Result<Constellation, &'static str> {
-
         let path = env::current_dir().unwrap().join("servo_resources/");
         if !path.exists() {
             return Err("Can't find servo_resources/ directory");
         }
         let path = path.to_str().unwrap().to_string();
         set_resources_path(Some(path));
+        Ok(Constellation {})
+    }
 
-        let mut opts = opts::default_opts();
-        opts.url = ServoUrl::parse("https://servo.org").ok();
-        opts::set_defaults(opts);
+    pub fn new_compositor(&self, gl_methods: Rc<GLMethods>, waker: Box<EventLoopWaker + Send>, geometry: DrawableGeometry) -> Compositor {
+        let cb = Rc::new(WindowCallback {
+            gl_methods: gl_methods.clone(),
+            waker: waker,
+            geometry: Cell::new(geometry),
+            event_queue: RefCell::new(Vec::new()),
+        });
+        Compositor {
+            servo: RefCell::new(Servo::new(cb.clone())),
+            callbacks: cb.clone(),
+        }
+    }
 
-        Ok(Constellation)
+    pub fn new_browser(&self, url: ServoUrl, compositor: &Compositor /*temporary*/) -> Result<BrowserId,()> {
+        compositor.new_browser(url)
     }
 }
 
 impl Compositor {
-    pub fn new(_constellation: &Constellation, gl: Rc<gl::Gl>) -> Compositor {
-        Compositor { gl: gl.clone() }
+    pub fn new_view(&self, geometry: DrawableGeometry) -> View {
+        self.callbacks.geometry.set(geometry);
+        View { }
     }
-}
-
-impl View {
-    pub fn new(compositor: &Compositor,
-               geometry: DrawableGeometry,
-               riser: Box<EventLoopRiser + 'static + Send>,
-               gl_methods: Rc<GLMethods>) -> View {
-
-        View {
-                    gl: compositor.gl.clone(),
-                    geometry: Cell::new(geometry),
-                    gl_methods: gl_methods,
-                    riser: riser,
-                    event_queue: RefCell::new(Vec::new()),
-        }
+    pub fn new_browser(&self, url: ServoUrl) -> Result<BrowserId,()> {
+        self.servo.borrow().create_browser(url)
     }
-
-    // FIXME
-    // pub fn new_headless(geometry: DrawableGeometry) {
-    //     View {
-    //         compositor: None,
-    //         geometry: Cell::new(geometry),
-    //     }
-    // }
-
-    pub fn get_events(&self) -> Vec<BrowserEvent> {
-        // FIXME: ports/glutin/window.rs uses mem::replace. Should we too?
-        // See: https://doc.rust-lang.org/core/mem/fn.replace.html
-        let mut events = self.event_queue.borrow_mut();
-        let copy = events.drain(..).collect();
-        copy
-    }
-}
-
-impl Browser {
-    pub fn new(_constellation: &Constellation, _url: ServoUrl, view: Rc<View>) -> Browser {
-        let servo = servo::Browser::new(view.clone());
-        Browser { servo_browser: RefCell::new(servo) }
-    }
-
-    pub fn initialize_compositing(&self) {
-        self.servo_browser.borrow_mut().handle_events(vec![WindowEvent::InitializeCompositing]);
-    }
-
-    pub fn handle_event(&self, event: WindowEvent) {
-        self.servo_browser
-            .borrow_mut()
-            .handle_events(vec![event]);
-    }
-
     pub fn perform_updates(&self) {
-        self.servo_browser.borrow_mut().handle_events(vec![]);
+        self.servo.borrow_mut().handle_events(vec![]);
+    }
+    pub fn get_events(&self) -> Vec<BrowserEvent> {
+        self.callbacks.get_events()
+    }
+    pub fn handle_event(&self, event: WindowEvent) {
+        self.servo.borrow_mut().handle_events(vec![event]);
     }
 }
 
 
-impl WindowMethods for View {
+impl WindowMethods for WindowCallback {
     fn prepare_for_composite(&self, _width: usize, _height: usize) -> bool {
         self.gl_methods.make_current().is_ok()
     }
@@ -176,21 +145,12 @@ impl WindowMethods for View {
         false
     }
 
-    fn allow_navigation(&self, _url: ServoUrl) -> bool {
-        true
-    }
-
-    fn create_compositor_channel(&self) -> (Box<CompositorProxy + Send>, Box<CompositorReceiver>) {
-        let (sender, receiver) = mpsc::channel();
-        (box SynchroCompositorProxy {
-                 sender: sender,
-                 riser: self.riser.clone(),
-             } as Box<CompositorProxy + Send>,
-         box receiver as Box<CompositorReceiver>)
+    fn create_event_loop_waker(&self) -> Box<EventLoopWaker> {
+        self.waker.clone()
     }
 
     fn gl(&self) -> Rc<gl::Gl> {
-        self.gl.clone()
+        self.gl_methods.get_gl()
     }
 
     fn hidpi_factor(&self) -> ScaleFactor<f32, DeviceIndependentPixel, DevicePixel> {
@@ -225,7 +185,7 @@ impl WindowMethods for View {
         TypedSize2D::new(width as f32, height as f32)
     }
 
-    fn client_window(&self) -> (Size2D<u32>, Point2D<i32>) {
+    fn client_window(&self, _id: BrowserId) -> (Size2D<u32>, Point2D<i32>) {
         let (width, height) = self.geometry.get().view_size;
         let (x, y) = self.geometry.get().position;
         (Size2D::new(width, height), Point2D::new(x as i32, y as i32))
@@ -233,68 +193,68 @@ impl WindowMethods for View {
 
     // Events
 
-    fn set_inner_size(&self, size: Size2D<u32>) {
+    fn set_inner_size(&self, id: BrowserId, size: Size2D<u32>) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::SetWindowInnerSize(size.width as u32, size.height as u32));
+            .push(BrowserEvent::SetWindowInnerSize(id, size.width as u32, size.height as u32));
     }
 
-    fn set_position(&self, point: Point2D<i32>) {
+    fn set_position(&self, id: BrowserId, point: Point2D<i32>) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::SetWindowPosition(point.x, point.y));
+            .push(BrowserEvent::SetWindowPosition(id, point.x, point.y));
     }
 
-    fn set_fullscreen_state(&self, state: bool) {
+    fn set_fullscreen_state(&self, id: BrowserId, state: bool) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::SetFullScreenState(state))
+            .push(BrowserEvent::SetFullScreenState(id, state))
     }
 
     fn present(&self) {
         self.gl_methods.swap_buffers();
     }
 
-    fn set_page_title(&self, title: Option<String>) {
+    fn set_page_title(&self, id: BrowserId, title: Option<String>) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::TitleChanged(title));
+            .push(BrowserEvent::TitleChanged(id, title));
     }
 
-    fn status(&self, status: Option<String>) {
+    fn status(&self, id: BrowserId, status: Option<String>) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::StatusChanged(status));
+            .push(BrowserEvent::StatusChanged(id, status));
     }
 
-    fn load_start(&self) {
+    fn load_start(&self, id: BrowserId) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::LoadStart);
+            .push(BrowserEvent::LoadStart(id));
     }
 
-    fn load_end(&self) {
+    fn load_end(&self, id: BrowserId) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::LoadEnd);
+            .push(BrowserEvent::LoadEnd(id));
     }
 
-    fn load_error(&self, _: NetError, url: String) {
+    fn load_error(&self, id: BrowserId, _: NetError, url: String) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::LoadError(url));
+            .push(BrowserEvent::LoadError(id, url));
     }
 
-    fn head_parsed(&self) {
+    fn head_parsed(&self, id: BrowserId) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::HeadParsed);
+            .push(BrowserEvent::HeadParsed(id));
     }
 
-    fn history_changed(&self, entries: Vec<LoadData>, current: usize) {
+    fn history_changed(&self, id: BrowserId, entries: Vec<LoadData>, current: usize) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::HistoryChanged(entries, current));
+            .push(BrowserEvent::HistoryChanged(id, entries, current));
     }
 
     fn set_cursor(&self, cursor: Cursor) {
@@ -303,36 +263,29 @@ impl WindowMethods for View {
             .push(BrowserEvent::CursorChanged(cursor));
     }
 
-    fn set_favicon(&self, url: ServoUrl) {
+    fn set_favicon(&self, id: BrowserId, url: ServoUrl) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::FaviconChanged(url));
+            .push(BrowserEvent::FaviconChanged(id, url));
     }
 
-    fn handle_key(&self, ch: Option<char>, key: Key, mods: constellation_msg::KeyModifiers) {
+    fn allow_navigation(&self, id: BrowserId, url: ServoUrl, chan: IpcSender<bool>) {
         self.event_queue
             .borrow_mut()
-            .push(BrowserEvent::Key(ch, key, mods));
+            .push(BrowserEvent::AllowNavigation(id, url, chan));
+    }
+
+    fn handle_key(&self, id: Option<BrowserId>, ch: Option<char>, key: Key, mods: constellation_msg::KeyModifiers) {
+        self.event_queue
+            .borrow_mut()
+            .push(BrowserEvent::Key(id, ch, key, mods));
     }
 }
 
-struct SynchroCompositorProxy {
-    sender: mpsc::Sender<compositor_thread::Msg>,
-    riser: Box<EventLoopRiser + Send>,
-}
-
-impl CompositorProxy for SynchroCompositorProxy {
-    fn send(&self, msg: compositor_thread::Msg) {
-        if let Err(err) = self.sender.send(msg) {
-            warn!("Failed to send response ({}).", err);
-        }
-        self.riser.rise();
-    }
-
-    fn clone_compositor_proxy(&self) -> Box<CompositorProxy + Send> {
-        box SynchroCompositorProxy {
-                sender: self.sender.clone(),
-                riser: self.riser.clone(),
-            } as Box<CompositorProxy + Send>
+impl WindowCallback {
+    pub fn get_events(&self) -> Vec<BrowserEvent> {
+        let mut events = self.event_queue.borrow_mut();
+        let copy = events.drain(..).collect();
+        copy
     }
 }
