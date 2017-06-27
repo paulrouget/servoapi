@@ -124,6 +124,10 @@ impl Compositor {
     pub fn new_browser(&self, url: ServoUrl) -> Result<BrowserId,()> {
         self.servo.borrow().create_browser(url)
     }
+    pub fn show(&self, id: Option<BrowserId>) {
+        self.servo.borrow().select_browser(id.unwrap());
+    }
+
     pub fn perform_updates(&self) {
         self.servo.borrow_mut().handle_events(vec![]);
     }
